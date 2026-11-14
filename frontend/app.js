@@ -2,10 +2,74 @@
 const $=id=>document.getElementById(id);
 let videoId=null,transcript=[],selected=-1;
 const backend=()=>localStorage.getItem('clipforge_api_url')||window.CLIPFORGE_API_URL||'';
-const api=async(path,opts={})=>{const r=await fetch(backend().replace(/\/$/,'')+path,opts);const data=await r.json().catch(()=>null);if(!r.ok||!data)throw Error(typeof data?.detail==='string'?data.detail:'Request failed ('+r.status+')');return data};
+let accessKey = '';
+const request = (path, opts = {}) => {
+    const headers = new Headers(opts.headers);
+    if (accessKey) headers.set('Authorization', 'Bearer ' + accessKey);
+    return fetch(backend().replace(/\/$/, '') + path, {...opts, headers, redirect: 'error'});
+};
+const api=async(path,opts={})=>{const r=await request(path,opts);const data=await r.json().catch(()=>null);if(!r.ok||!data)throw Error(typeof data?.detail==='string'?data.detail:'Request failed ('+r.status+')');return data};
 const msg=(id,value)=>{const e=$(id);if(e)e.textContent=value};
-async function health(){try{const x=await api('/api/health');msg('server',x.ffmpeg?'Engine online':'FFmpeg unavailable');msg('backendStatus','Connected')}catch(e){msg('server','Backend offline');msg('backendStatus','Start the Python backend and enter its LAN URL')}}
-$('backendUrl').value=backend();$('saveBackend').onclick=()=>{localStorage.setItem('clipforge_api_url',$('backendUrl').value.trim().replace(/\/$/,''));health()};
+async function health() {
+    try {
+        const status = await api('/api/health');
+        await api('/api/access');
+        msg('server', status.ffmpeg ? 'Engine online' : 'FFmpeg unavailable');
+        msg('backendStatus', 'Connected');
+    } catch (error) {
+        msg('server', 'Connection unavailable');
+        msg('backendStatus', error.message);
+    }
+}
+$('backendUrl').value = backend();
+$('saveBackend').onclick = () => {
+    const value = $('backendUrl').value.trim();
+    const key = $('backendKey').value.trim();
+    try {
+        const destination = new URL(value || location.origin);
+        if (value && (!['http:', 'https:'].includes(destination.protocol) ||
+            destination.username || destination.password || destination.pathname !== '/' ||
+            destination.search || destination.hash)) throw Error('Enter the backend origin.');
+        if (key && destination.protocol !== 'https:' &&
+            !['localhost', '127.0.0.1', '[::1]'].includes(destination.hostname)) {
+            throw Error('Use an HTTPS backend URL when sending an access key.');
+        }
+        if ((value ? destination.origin : '') !== backend()) {
+            videoId = null;
+            for (const id of editorActions) $(id).disabled = true;
+            for (const id of ['download', 'srtDownload']) $(id).classList.add('hidden');
+        }
+        accessKey = key;
+        localStorage.setItem('clipforge_api_url', value ? destination.origin : '');
+        $('backendKey').value = '';
+        health();
+    } catch (error) {
+        msg('backendStatus', error.message);
+    }
+};
+
+function offerDownload(id, path, filename) {
+    const link = $(id);
+    link.onclick = async event => {
+        event.preventDefault();
+        try {
+            const response = await request(path);
+            if (!response.ok) throw Error('Download unavailable. Check your backend connection.');
+            const url = URL.createObjectURL(await response.blob());
+            const download = document.createElement('a');
+            download.href = url;
+            download.download = filename;
+            document.body.append(download);
+            download.click();
+            download.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch (error) {
+            msg('exportStatus', error.message);
+        }
+    };
+    link.href = '#';
+    link.classList.remove('hidden');
+}
 let checkedYouTubeUrl = '', objectUrl = '';
 const editorActions = ['analyze', 'generateCaptions', 'addCaption', 'export'];
 const jsonHeaders = {'Content-Type': 'application/json'};
@@ -112,5 +176,5 @@ $('cueStart').onchange=e=>{if(selected>=0)transcript[selected].start=Number(e.ta
 $('cueEnd').onchange=e=>{if(selected>=0)transcript[selected].end=Number(e.target.value);drawCaptions()};
 $('deleteCaption').onclick=()=>{if(selected>=0)transcript.splice(selected,1);selected=-1;$('captionEditor').classList.add('hidden');drawCaptions()};
 $('undoCaption').onclick=()=>msg('timelineStatus','Undo is not available in this build');
-$('export').onclick=async()=>{try{msg('exportStatus','Starting render...');const body={start:Number($('start').value),end:Number($('end').value),aspect:$('aspect').value,subtitles:$('subtitles').checked,transcript:transcript};const sourceId=videoId;const x=await api('/api/videos/'+sourceId+'/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const job=x.job_id||x.job;for(let i=0;i<120;i++){await new Promise(r=>setTimeout(r,2000));const j=await api('/api/jobs/'+job);if(sourceId!==videoId)return;msg('exportStatus',j.status||'Processing');if(j.status==='done'||j.status==='completed'){const a=$('download');a.href=backend()+j.url;if(j.srt_url){$('srtDownload').href=backend()+j.srt_url;$('srtDownload').classList.remove('hidden');}a.classList.remove('hidden');msg('exportStatus','Ready to download');break}if(j.status==='error'||j.status==='failed')throw Error(j.error||'Render failed')}}catch(e){msg('exportStatus',e.message)}};
+$('export').onclick=async()=>{try{msg('exportStatus','Starting render...');const body={start:Number($('start').value),end:Number($('end').value),aspect:$('aspect').value,subtitles:$('subtitles').checked,transcript:transcript};const sourceId=videoId;const x=await api('/api/videos/'+sourceId+'/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const job=x.job_id||x.job;for(let i=0;i<120;i++){await new Promise(r=>setTimeout(r,2000));const j=await api('/api/jobs/'+job);if(sourceId!==videoId)return;msg('exportStatus',j.status||'Processing');if(j.status==='done'||j.status==='completed'){offerDownload('download',j.url,'clipforge-export.mp4');if(j.srt_url)offerDownload('srtDownload',j.srt_url,'clipforge-captions.srt');msg('exportStatus','Ready to download');break}if(j.status==='error'||j.status==='failed')throw Error(j.error||'Render failed')}}catch(e){msg('exportStatus',e.message)}};
 health();

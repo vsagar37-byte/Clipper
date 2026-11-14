@@ -1,10 +1,11 @@
 import json, os, re, shutil, subprocess, threading, time, uuid
+from hmac import compare_digest
 from pathlib import Path
 from collections import Counter
 from urllib.parse import parse_qs, urlsplit
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -17,6 +18,29 @@ MAX_UPLOAD = int(os.getenv('MAX_UPLOAD_MB', '500')) * 1024 * 1024
 MAX_DURATION = int(os.getenv('MAX_DURATION_SECONDS', '3600'))
 JOBS = {}
 app = FastAPI(title='ClipForge API', version='0.3.0')
+
+
+@app.middleware('http')
+async def require_api_access(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith('/api/') or (path == '/api/health' and request.method == 'GET'):
+        return await call_next(request)
+
+    key = os.getenv('CLIPFORGE_ACCESS_KEY', '')
+    required = os.getenv('CLIPFORGE_REQUIRE_ACCESS_KEY') == '1'
+    if required and len(key) < 32:
+        return JSONResponse({'detail': 'Backend access key is not configured.'}, status_code=503)
+    if key:
+        supplied = request.headers.get('authorization', '')
+        if not compare_digest(supplied.encode('utf-8'), f'Bearer {key}'.encode('utf-8')):
+            return JSONResponse(
+                {'detail': 'Enter the backend access key and reconnect.'},
+                status_code=401,
+                headers={'WWW-Authenticate': 'Bearer'},
+            )
+    return await call_next(request)
+
+
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv('CORS_ORIGINS','http://localhost,https://localhost,http://127.0.0.1:8000').split(','), allow_methods=['*'], allow_headers=['*'])
 
 def run(args, timeout=240, cwd=None):
@@ -39,6 +63,11 @@ def source(vid):
 @app.get('/api/health')
 def health():
     return {'status':'ok','ffmpeg':bool(shutil.which('ffmpeg')),'transcription_available':_whisper_available()}
+
+
+@app.get('/api/access')
+def access():
+    return {'status': 'ok'}
 
 def _whisper_available():
     try:
