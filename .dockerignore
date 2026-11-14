@@ -1,0 +1,10 @@
+.git
+.github
+android
+data
+__pycache__
+*.pyc
+*.mp4
+*.mov
+*.zip
+.venv
