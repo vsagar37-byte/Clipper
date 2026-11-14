@@ -7,6 +7,10 @@ services:
     dockerContext: .
     healthCheckPath: /api/health
     envVars:
+      - key: CLIPFORGE_REQUIRE_ACCESS_KEY
+        value: "1"
+      - key: CLIPFORGE_ACCESS_KEY
+        generateValue: true
       - key: CLIPFORGE_DATA
         value: /app/data
       - key: MAX_UPLOAD_MB
