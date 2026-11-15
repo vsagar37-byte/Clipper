@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from urllib.parse import urlparse, parse_qs
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.getenv('CLIPFORGE_DATA', ROOT / 'data')).resolve()
@@ -59,6 +60,81 @@ async def upload(file:UploadFile=File(...)):
     except (ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         shutil.rmtree(folder,ignore_errors=True)
         raise HTTPException(400,str(e))
+
+
+class YouTubeImportRequest(BaseModel):
+    url: str = Field(min_length=12, max_length=2048)
+
+def youtube_video_id(url: str) -> str:
+    parsed = urlparse(url.strip())
+    host = (parsed.hostname or '').lower()
+    if parsed.scheme != 'https' or parsed.username or parsed.password or parsed.port:
+        raise HTTPException(400, 'Use a valid HTTPS YouTube link')
+    if host in ('youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com'):
+        if parsed.path == '/watch':
+            video_id = parse_qs(parsed.query).get('v', [''])[0]
+        elif parsed.path.startswith(('/shorts/', '/live/', '/embed/')):
+            video_id = parsed.path.split('/')[2]
+        else:
+            raise HTTPException(400, 'Unsupported YouTube link')
+    elif host in ('youtu.be', 'www.youtu.be'):
+        video_id = parsed.path.strip('/')
+    else:
+        raise HTTPException(400, 'Only YouTube links are supported')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+        raise HTTPException(400, 'Invalid YouTube video ID')
+    return video_id
+
+@app.post('/api/import/youtube')
+def import_youtube(req: YouTubeImportRequest):
+    # Reconstruct a canonical URL: never send arbitrary user-supplied URLs to yt-dlp.
+    video_id = youtube_video_id(req.url)
+    try:
+        import yt_dlp
+    except ImportError:
+        raise HTTPException(503, 'YouTube importer is not installed')
+    vid = uuid.uuid4().hex
+    folder = DATA / vid
+    folder.mkdir()
+    path = folder / 'source.mp4'
+    canonical = 'https://www.youtube.com/watch?v=' + video_id
+    options = {
+        'format': 'best[ext=mp4][height<=720]/best[height<=720]/best',
+        'outtmpl': str(folder / 'download.%(ext)s'),
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+        'socket_timeout': 20,
+        'retries': 2,
+        'max_filesize': MAX_UPLOAD,
+        'match_filter': yt_dlp.utils.match_filter_func('duration <= ' + str(MAX_DURATION)),
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as downloader:
+            info = downloader.extract_info(canonical, download=False)
+            if not info or info.get('is_live') or info.get('live_status') in ('is_live', 'is_upcoming'):
+                raise ValueError('Live streams are not supported')
+            if info.get('duration') and info['duration'] > MAX_DURATION:
+                raise ValueError('Video exceeds duration limit')
+            downloader.download([canonical])
+        downloaded = next((p for p in folder.glob('download.*') if p.is_file()), None)
+        if not downloaded:
+            raise ValueError('YouTube download did not produce a video file')
+        if downloaded.stat().st_size > MAX_UPLOAD:
+            raise ValueError('Video exceeds file size limit')
+        # Normalize formats for HTML5 preview and existing FFmpeg pipeline.
+        run(['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error', '-i', str(downloaded),
+             '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'libx264', '-preset', 'veryfast',
+             '-crf', '25', '-c:a', 'aac', '-movflags', '+faststart', str(path)], timeout=900)
+        downloaded.unlink(missing_ok=True)
+        meta = probe(path)
+        if path.stat().st_size > MAX_UPLOAD:
+            raise ValueError('Processed video exceeds file size limit')
+        (folder / 'meta.json').write_text(json.dumps(meta))
+        return {'id': vid, **meta, 'video_url': f'/api/videos/{vid}/source'}
+    except Exception as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(400, 'YouTube import failed: ' + str(exc)[:300]) from exc
 
 @app.get('/api/videos/{vid}/source')
 def video_file(vid:str):
