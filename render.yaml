@@ -2,11 +2,15 @@ services:
   - type: web
     name: clipforge-ai-backend
     runtime: docker
-    plan: starter
+    plan: free
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/health
     envVars:
+      - key: CLIPFORGE_REQUIRE_ACCESS_KEY
+        value: "1"
+      - key: CLIPFORGE_ACCESS_KEY
+        generateValue: true
       - key: CLIPFORGE_DATA
         value: /app/data
       - key: MAX_UPLOAD_MB
@@ -17,7 +21,3 @@ services:
         value: tiny
       - key: CORS_ORIGINS
         value: "https://localhost,http://localhost"
-    disk:
-      name: clipforge-data
-      mountPath: /app/data
-      sizeGB: 10

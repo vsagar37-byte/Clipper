@@ -1,24 +1,50 @@
 import json, os, re, shutil, subprocess, threading, time, uuid
+from hmac import compare_digest
 from pathlib import Path
 from collections import Counter
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from urllib.parse import parse_qs, urlsplit
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from urllib.parse import urlparse, parse_qs
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent
+if not (ROOT / 'frontend').is_dir():
+    ROOT = ROOT.parent
 DATA = Path(os.getenv('CLIPFORGE_DATA', ROOT / 'data')).resolve()
 DATA.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD = int(os.getenv('MAX_UPLOAD_MB', '500')) * 1024 * 1024
 MAX_DURATION = int(os.getenv('MAX_DURATION_SECONDS', '3600'))
 JOBS = {}
 app = FastAPI(title='ClipForge API', version='0.3.0')
+
+
+@app.middleware('http')
+async def require_api_access(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith('/api/') or (path == '/api/health' and request.method == 'GET'):
+        return await call_next(request)
+
+    key = os.getenv('CLIPFORGE_ACCESS_KEY', '')
+    required = os.getenv('CLIPFORGE_REQUIRE_ACCESS_KEY') == '1'
+    if required and len(key) < 32:
+        return JSONResponse({'detail': 'Backend access key is not configured.'}, status_code=503)
+    if key:
+        supplied = request.headers.get('authorization', '')
+        if not compare_digest(supplied.encode('utf-8'), f'Bearer {key}'.encode('utf-8')):
+            return JSONResponse(
+                {'detail': 'Enter the backend access key and reconnect.'},
+                status_code=401,
+                headers={'WWW-Authenticate': 'Bearer'},
+            )
+    return await call_next(request)
+
+
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv('CORS_ORIGINS','http://localhost,https://localhost,http://127.0.0.1:8000').split(','), allow_methods=['*'], allow_headers=['*'])
 
-def run(args, timeout=240):
-    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=True)
+def run(args, timeout=240, cwd=None):
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=True, cwd=cwd)
 
 def probe(path):
     info=json.loads(run(['ffprobe','-v','error','-show_format','-show_streams','-of','json',str(path)]).stdout)
@@ -36,7 +62,22 @@ def source(vid):
 
 @app.get('/api/health')
 def health():
-    return {'status':'ok','ffmpeg':bool(shutil.which('ffmpeg')),'transcription_available':_whisper_available()}
+    media_tools_ready = bool(shutil.which('ffmpeg') and shutil.which('ffprobe'))
+    access_ready = (
+        os.getenv('CLIPFORGE_REQUIRE_ACCESS_KEY') != '1'
+        or len(os.getenv('CLIPFORGE_ACCESS_KEY', '')) >= 32
+    )
+    ready = media_tools_ready and access_ready
+    return JSONResponse(
+        {'status': 'ok' if ready else 'unavailable', 'ffmpeg': media_tools_ready,
+         'transcription_available': _whisper_available()},
+        status_code=200 if ready else 503,
+    )
+
+
+@app.get('/api/access')
+def access():
+    return {'status': 'ok'}
 
 def _whisper_available():
     try:
@@ -44,8 +85,49 @@ def _whisper_available():
         return True
     except ImportError: return False
 
+class YouTubeLink(BaseModel):
+    url: str = Field(max_length=2048)
+
+
+def youtube_video_id(url: str) -> str:
+    try:
+        parsed = urlsplit(url.strip())
+        host = parsed.netloc.lower()
+        video_id = ''
+        if parsed.scheme == 'https':
+            if host == 'youtu.be':
+                video_id = parsed.path.removeprefix('/')
+            elif host in {'youtube.com', 'www.youtube.com', 'm.youtube.com'}:
+                if parsed.path == '/watch':
+                    values = parse_qs(parsed.query, keep_blank_values=True).get('v', [])
+                    if len(values) == 1:
+                        video_id = values[0]
+                elif parsed.path.startswith('/shorts/'):
+                    video_id = parsed.path.removeprefix('/shorts/')
+        if len(url) <= 2048 and re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+            return video_id
+    except ValueError:
+        pass
+    raise HTTPException(400, 'Enter an HTTPS YouTube watch, Shorts, or youtu.be video link.')
+
+
+@app.post('/api/import/youtube/validate')
+def validate_youtube_link(link: YouTubeLink):
+    video_id = youtube_video_id(link.url)
+    return {'studio_url': f'https://studio.youtube.com/video/{video_id}/edit'}
+
+
 @app.post('/api/upload')
-async def upload(file:UploadFile=File(...)):
+async def upload(
+    file: UploadFile = File(...),
+    youtube_url: str | None = Form(None),
+    authorized: bool = Form(False),
+):
+    youtube_id = None
+    if youtube_url is not None:
+        youtube_id = youtube_video_id(youtube_url)
+        if not authorized:
+            raise HTTPException(403, 'Confirm you have permission to use this video file.')
     vid=uuid.uuid4().hex; folder=DATA/vid; folder.mkdir()
     path=folder/'source.mp4'; total=0
     try:
@@ -55,86 +137,13 @@ async def upload(file:UploadFile=File(...)):
                 if total>MAX_UPLOAD: raise ValueError('File exceeds upload limit')
                 f.write(chunk)
         meta=probe(path)
+        if youtube_id:
+            meta['youtube_video_id'] = youtube_id
         (folder/'meta.json').write_text(json.dumps(meta))
         return {'id':vid,**meta,'video_url':f'/api/videos/{vid}/source'}
     except (ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         shutil.rmtree(folder,ignore_errors=True)
         raise HTTPException(400,str(e))
-
-
-class YouTubeImportRequest(BaseModel):
-    url: str = Field(min_length=12, max_length=2048)
-
-def youtube_video_id(url: str) -> str:
-    parsed = urlparse(url.strip())
-    host = (parsed.hostname or '').lower()
-    if parsed.scheme != 'https' or parsed.username or parsed.password or parsed.port:
-        raise HTTPException(400, 'Use a valid HTTPS YouTube link')
-    if host in ('youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com'):
-        if parsed.path == '/watch':
-            video_id = parse_qs(parsed.query).get('v', [''])[0]
-        elif parsed.path.startswith(('/shorts/', '/live/', '/embed/')):
-            video_id = parsed.path.split('/')[2]
-        else:
-            raise HTTPException(400, 'Unsupported YouTube link')
-    elif host in ('youtu.be', 'www.youtu.be'):
-        video_id = parsed.path.strip('/')
-    else:
-        raise HTTPException(400, 'Only YouTube links are supported')
-    if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
-        raise HTTPException(400, 'Invalid YouTube video ID')
-    return video_id
-
-@app.post('/api/import/youtube')
-def import_youtube(req: YouTubeImportRequest):
-    # Reconstruct a canonical URL: never send arbitrary user-supplied URLs to yt-dlp.
-    video_id = youtube_video_id(req.url)
-    try:
-        import yt_dlp
-    except ImportError:
-        raise HTTPException(503, 'YouTube importer is not installed')
-    vid = uuid.uuid4().hex
-    folder = DATA / vid
-    folder.mkdir()
-    path = folder / 'source.mp4'
-    canonical = 'https://www.youtube.com/watch?v=' + video_id
-    options = {
-        'format': 'best[ext=mp4][height<=720]/best[height<=720]/best',
-        'outtmpl': str(folder / 'download.%(ext)s'),
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-        'socket_timeout': 20,
-        'retries': 2,
-        'max_filesize': MAX_UPLOAD,
-        'match_filter': yt_dlp.utils.match_filter_func('duration <= ' + str(MAX_DURATION)),
-    }
-    try:
-        with yt_dlp.YoutubeDL(options) as downloader:
-            info = downloader.extract_info(canonical, download=False)
-            if not info or info.get('is_live') or info.get('live_status') in ('is_live', 'is_upcoming'):
-                raise ValueError('Live streams are not supported')
-            if info.get('duration') and info['duration'] > MAX_DURATION:
-                raise ValueError('Video exceeds duration limit')
-            downloader.download([canonical])
-        downloaded = next((p for p in folder.glob('download.*') if p.is_file()), None)
-        if not downloaded:
-            raise ValueError('YouTube download did not produce a video file')
-        if downloaded.stat().st_size > MAX_UPLOAD:
-            raise ValueError('Video exceeds file size limit')
-        # Normalize formats for HTML5 preview and existing FFmpeg pipeline.
-        run(['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error', '-i', str(downloaded),
-             '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'libx264', '-preset', 'veryfast',
-             '-crf', '25', '-c:a', 'aac', '-movflags', '+faststart', str(path)], timeout=900)
-        downloaded.unlink(missing_ok=True)
-        meta = probe(path)
-        if path.stat().st_size > MAX_UPLOAD:
-            raise ValueError('Processed video exceeds file size limit')
-        (folder / 'meta.json').write_text(json.dumps(meta))
-        return {'id': vid, **meta, 'video_url': f'/api/videos/{vid}/source'}
-    except Exception as exc:
-        shutil.rmtree(folder, ignore_errors=True)
-        raise HTTPException(400, 'YouTube import failed: ' + str(exc)[:300]) from exc
 
 @app.get('/api/videos/{vid}/source')
 def video_file(vid:str):
@@ -321,12 +330,12 @@ def export_worker(job,vid,req):
             ass=folder/f'{job}.ass'
             if not write_animated_ass(ass,segments,req.start,req.end,req,w,h):
                 raise ValueError('No captions overlap the selected clip')
-            vf+=f',ass={ass.as_posix()}'
+            vf+=f',ass={ass.name}'
         cmd=['ffmpeg','-y','-hide_banner','-loglevel','error','-ss',str(req.start),'-i',str(path),'-t',str(req.end-req.start),'-vf',vf,'-c:v','libx264','-preset','veryfast','-crf','23','-pix_fmt','yuv420p']
         if meta['has_audio']: cmd+=['-c:a','aac','-b:a','128k']
         else: cmd+=['-an']
         cmd+=['-movflags','+faststart',str(out)]
-        run(cmd,timeout=900)
+        run(cmd,timeout=900,cwd=folder)
         JOBS[job]={'status':'done','url':f'/api/exports/{vid}/{job}','srt_url':f'/api/exports/{vid}/{job}/captions' if req.subtitles else None}
     except Exception as e: JOBS[job]={'status':'error','error':str(e)}
 
