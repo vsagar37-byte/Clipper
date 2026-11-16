@@ -12,9 +12,19 @@ const api=async(path,opts={})=>{const r=await request(path,opts);const data=awai
 const msg=(id,value)=>{const e=$(id);if(e)e.textContent=value};
 async function health() {
     try {
-        const status = await api('/api/health');
+        const response = await request('/api/health');
+        const status = await response.json().catch(() => null);
+        if (!status) throw Error('Backend did not return a health status.');
+        if (!status.ffmpeg) {
+            msg('server', 'FFmpeg unavailable');
+            msg('backendStatus', 'Connected. Install FFmpeg and FFprobe on the server.');
+            return;
+        }
+        if (!response.ok) {
+            throw Error(typeof status.detail === 'string' ? status.detail : 'Backend is unavailable.');
+        }
         await api('/api/access');
-        msg('server', status.ffmpeg ? 'Engine online' : 'FFmpeg unavailable');
+        msg('server', 'Engine online');
         msg('backendStatus', 'Connected');
     } catch (error) {
         msg('server', 'Connection unavailable');
@@ -141,6 +151,7 @@ async function uploadVideo(input, youtubeUrl = '') {
         if (objectUrl) URL.revokeObjectURL(objectUrl);
         objectUrl = URL.createObjectURL(file);
         $('player').src = objectUrl;
+        $('player').classList.add('visible');
         $('placeholder').style.display = 'none';
         msg('meta', file.name);
         msg('uploadStatus', 'Video ready');
@@ -161,13 +172,17 @@ $('youtubeFile').onchange = event => {
         return uploadVideo(event.target, checkedYouTubeUrl);
     }
 };
-$('markStart').onclick=()=>{$('start').value=$('player').currentTime.toFixed(1)};
-$('markEnd').onclick=()=>{$('end').value=$('player').currentTime.toFixed(1)};
+function setTrim(start, end) {
+    $('start').value = $('rangeStart').value = start;
+    $('end').value = $('rangeEnd').value = end;
+}
+$('markStart').onclick=()=>setTrim($('player').currentTime.toFixed(1), $('end').value);
+$('markEnd').onclick=()=>setTrim($('start').value, $('player').currentTime.toFixed(1));
 $('rangeStart').oninput=e=>$('start').value=e.target.value;
 $('rangeEnd').oninput=e=>$('end').value=e.target.value;
 $('start').oninput=e=>$('rangeStart').value=e.target.value;
 $('end').oninput=e=>$('rangeEnd').value=e.target.value;
-$('analyze').onclick=async()=>{try{msg('analysisStatus','Analyzing...');const sourceId=videoId;const x=await api('/api/videos/'+sourceId+'/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clip_length:Number($('duration').value),count:Number($('count').value),transcribe:$('transcribe').checked})});if(sourceId!==videoId)return;msg('analysisStatus',x.warning||'Analysis complete');const list=$('suggestions');list.replaceChildren();for(const s of (x.suggestions||x.clips||[])){const b=document.createElement('button');b.textContent=(s.start||0).toFixed(1)+'–'+(s.end||0).toFixed(1)+'s';b.onclick=()=>{$('start').value=s.start;$('end').value=s.end};list.append(b)}}catch(e){msg('analysisStatus',e.message)}};
+$('analyze').onclick=async()=>{try{msg('analysisStatus','Analyzing...');const sourceId=videoId;const x=await api('/api/videos/'+sourceId+'/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clip_length:Number($('duration').value),count:Number($('count').value),transcribe:$('transcribe').checked})});if(sourceId!==videoId)return;msg('analysisStatus',x.warning||'Analysis complete');const list=$('suggestions');list.replaceChildren();for(const s of (x.suggestions||x.clips||[])){const b=document.createElement('button');b.className='suggestion';b.textContent=(s.start||0).toFixed(1)+'–'+(s.end||0).toFixed(1)+'s';b.onclick=()=>setTrim(s.start, s.end);list.append(b)}}catch(e){msg('analysisStatus',e.message)}};
 function drawCaptions(){const t=$('timelineTrack');t.querySelectorAll('.cue').forEach(x=>x.remove());transcript.forEach((c,i)=>{const b=document.createElement('button');b.className='cue';b.textContent=c.text;b.onclick=()=>{selected=i;$('captionEditor').classList.remove('hidden');$('cueText').value=c.text;$('cueStart').value=c.start;$('cueEnd').value=c.end};t.append(b)});msg('timelineStatus',transcript.length+' caption segments')};
 $('generateCaptions').onclick=async()=>{try{msg('timelineStatus','Transcribing...');const sourceId=videoId;const x=await api('/api/videos/'+sourceId+'/transcribe',{method:'POST'});if(sourceId!==videoId)return;transcript=x.cues||x.segments||x.transcript||[];if(!Array.isArray(transcript))transcript=[];drawCaptions()}catch(e){msg('timelineStatus',e.message)}};
 $('addCaption').onclick=()=>{transcript.push({start:Number($('start').value),end:Number($('end').value),text:'New caption'});drawCaptions()};

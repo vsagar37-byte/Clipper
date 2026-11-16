@@ -9,12 +9,13 @@ A runnable local-first video clipper with a responsive browser UI, manual trimmi
 
 ## Run web app
 
+From the project root. Use Python 3.10 or newer. macOS system `python3` is often 3.9, which cannot run this app.
+
 ```bash
-cd clipforge-mvp
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\\Scripts\\activate
 pip install -r backend/requirements.txt
-uvicorn backend.main:app --host 127.0.0.1 --port 8000
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 Open **http://127.0.0.1:8000**. The API docs are at **http://127.0.0.1:8000/docs**.

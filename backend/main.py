@@ -1,3 +1,7 @@
+import sys
+if sys.version_info < (3, 10):
+    raise SystemExit(f'ClipForge requires Python 3.10 or newer. This interpreter is {sys.version.split()[0]}.')
+
 import json, os, re, shutil, subprocess, threading, time, uuid
 from hmac import compare_digest
 from pathlib import Path
