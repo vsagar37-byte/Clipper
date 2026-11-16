@@ -27,7 +27,7 @@ python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
 Find the computer's Wi-Fi IPv4 address (`ipconfig` on Windows; `ip addr` or Network settings on Linux/macOS). Example: `192.168.1.10`. From your phone browser, verify `http://192.168.1.10:8000/api/health` loads. Allow inbound TCP port 8000 on the computer's firewall for **private networks only**. Do not forward the port to the public internet.
 
 ## 2. Generate Android project and debug APK
-Install Node.js 20+, Android Studio, Android SDK (API 35 or supported latest), SDK Build-Tools, and JDK 17. Open a terminal in the **android** folder:
+Install Node.js 20+, Android Studio, Android SDK API 34, Build-Tools 34.0.0, and JDK 17. Capacitor 6 compiles against API 34. Open a terminal in the **android** folder:
 
 ```bash
 npm install
@@ -44,17 +44,17 @@ In Android Studio, wait for Gradle sync. Select **Build > Build Bundle(s) / APK(
 
 `android/android/app/build/outputs/apk/debug/app-debug.apk`
 
-Alternative from the `android` folder (after Android Studio/SDK setup):
+Alternative from the project root, after `npm run android:init` has created the native project:
 
 macOS/Linux:
 ```bash
-cd android
+cd android/android
 ./gradlew assembleDebug
 ```
 
 Windows PowerShell:
 ```powershell
-cd android
+cd android\android
 .\gradlew.bat assembleDebug
 ```
 
