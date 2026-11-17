@@ -4,12 +4,12 @@ A runnable local-first video clipper with a responsive browser UI, manual trimmi
 
 ## Requirements
 
-- Python 3.10+; FFmpeg and FFprobe installed and available on PATH.
+- Python 3.11+; FFmpeg and FFprobe installed and available on PATH.
 - Node.js 18+ and Android Studio for Android packaging.
 
 ## Run web app
 
-From the project root. Use Python 3.10 or newer. macOS system `python3` is often 3.9, which cannot run this app.
+From the project root. Use Python 3.11 or newer. macOS system `python3` is often 3.9, which cannot run this app.
 
 ```bash
 python3 -m venv .venv
@@ -68,7 +68,7 @@ In Android Studio, connect a device/emulator and run or build an APK. Android SD
 ## Important MVP limitations
 
 1. Automatic scoring is **heuristic** (scene cuts, silence, optional speech keywords). It is not a learned virality model or a guaranteed viral score.
-2. The app accepts **local video uploads**, not YouTube URL downloads. For third-party videos, upload only content you have permission to process.
+2. Public YouTube links can be imported directly with yt-dlp. Availability depends on YouTube and the hosting server; blocked, private, live, or restricted videos may fail. Local upload remains available.
 3. 9:16 reframing uses center crop, **not** speaker/object tracking. It can crop out an off-center subject.
 4. Subtitle generation requires optional Whisper transcription and an FFmpeg build with libass. Transcript language support depends on the installed Whisper model.
 5. Jobs are in memory and exports are stored on local disk; there is no login, persistent job queue, automatic cleanup, cloud storage, or multi-user isolation.
@@ -103,3 +103,31 @@ Install `pip install faster-whisper` to transcribe new videos. Models download o
 - Edited text/timing overrides original transcription when exporting. Editing a cue invalidates its original word timestamps, so that cue uses whole-line captions rather than inaccurate word highlighting.
 - Export MP4 and SRT reflect all timeline edits. Captions must be enabled for export; if no cues exist, Whisper transcribes automatically if installed.
 - Android is still a Capacitor source wrapper, not a compiled APK. Backend must be accessible over the network.
+
+
+## v0.5 — Direct YouTube import
+
+Paste a public watch, Shorts, or youtu.be link and select **Import & find highlights**.
+The server downloads up to 720p MP4, loads it into the editor, and runs the selected
+highlight analysis (default: five 30-second suggestions). Review a suggestion and
+export using the existing aspect ratio and caption controls.
+
+Install Python 3.11+, the backend requirements, FFmpeg, and Node.js 22+ (used by
+yt-dlp for YouTube JavaScript challenges). The Docker image includes these tools.
+`POST /api/import/youtube` accepts `{"url":"https://youtu.be/VIDEO_ID"}` and returns
+a job ID; poll `/api/jobs/{job_id}` for `processing`, `done` with a `video` object,
+or `error` with a readable message. The existing access-key middleware applies.
+
+Imports are limited to one at a time per server process, 15 minutes of processing,
+`MAX_UPLOAD_MB` final size, and `MAX_DURATION_SECONDS` footage length. The Docker
+and Render defaults now allow 60 minutes (existing Render services need their
+1800-second setting updated to 3600). Temporary files are removed on handled
+failure. Restarting the server loses job state; use one Uvicorn worker.
+
+No cookies or proxy rotation are used. A deployment may still receive YouTube
+anti-bot or availability errors. This feature does not guarantee every link works.
+Highlights remain heuristic scene/audio/speech suggestions, not a semantic model
+that understands every scene. Captions require Whisper. The Android shell must
+be rebuilt to include the updated frontend.
+
+Test: `python -m unittest discover -s tests -p 'test_*.py'`

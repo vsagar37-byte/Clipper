@@ -24,15 +24,15 @@ can run without a key when the backend binds to loopback.
 Free instances can idle and lose uploads and exports on spin-down, restart, or redeploy. Download finished clips promptly. Jobs are in-memory and are also lost when the service stops.
 Automatic captions use faster-whisper and may exceed the Free instance's memory. Caption performance needs to be verified on Render.
 
-## YouTube-assisted import
+## Direct YouTube import (v0.5)
 
-Deploy the matching frontend and backend together. Rebuild the Android APK so it
-includes the updated frontend. No YouTube credentials, download service, or
-additional Render settings are needed.
+Deploy the matching frontend and backend together and rebuild the Android APK.
+Paste a public YouTube link and choose **Import & find highlights**. The Docker
+image includes yt-dlp, its JavaScript support package, Node.js, and FFmpeg.
 
-Paste a watch, Shorts, or youtu.be link and open the validated video in YouTube
-Studio. Save your upload using YouTube's Download or Save to device option, then
-select the file in ClipForge and confirm editing permission. If Studio cannot
-provide the download, use an authorized original file through the local upload.
-Link validation checks the URL format. YouTube Studio handles availability and
-download access. Both upload paths use the same size and duration limits.
+Set MAX_DURATION_SECONDS=3600 for videos up to one hour; older services may still
+have the previous 1800-second value. MAX_UPLOAD_MB defaults to 200 on Render.
+Only one import runs at once. Downloads time out after 15 minutes and return a
+clear error if YouTube rejects the server. No login credentials, cookies, or
+proxy rotation are used. File upload remains the fallback. Free hosting may not
+have enough memory for speech analysis; direct import does not change that.

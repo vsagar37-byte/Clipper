@@ -21,7 +21,8 @@ DATA.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD = int(os.getenv('MAX_UPLOAD_MB', '500')) * 1024 * 1024
 MAX_DURATION = int(os.getenv('MAX_DURATION_SECONDS', '3600'))
 JOBS = {}
-app = FastAPI(title='ClipForge API', version='0.3.0')
+IMPORT_SLOT = threading.BoundedSemaphore(1)
+app = FastAPI(title='ClipForge API', version='0.5.0')
 
 
 @app.middleware('http')
@@ -119,6 +120,36 @@ def youtube_video_id(url: str) -> str:
 def validate_youtube_link(link: YouTubeLink):
     video_id = youtube_video_id(link.url)
     return {'studio_url': f'https://studio.youtube.com/video/{video_id}/edit'}
+
+
+@app.post('/api/import/youtube', status_code=202)
+def import_youtube(link: YouTubeLink, background: BackgroundTasks):
+    video_id = youtube_video_id(link.url)
+    if not IMPORT_SLOT.acquire(blocking=False):
+        raise HTTPException(429, 'Another YouTube import is running. Wait for it to finish.')
+    job = uuid.uuid4().hex
+    JOBS[job] = {'status': 'processing', 'stage': 'Downloading from YouTube'}
+    background.add_task(youtube_import_worker, job, video_id)
+    return {'job_id': job, 'status': 'processing'}
+
+
+def youtube_import_worker(job, video_id):
+    from backend.youtube_import import download_youtube
+    vid = uuid.uuid4().hex
+    folder = DATA / vid
+    try:
+        folder.mkdir()
+        details = download_youtube(video_id, folder, MAX_UPLOAD, MAX_DURATION)
+        meta = {**probe(folder / 'source.mp4'), **details}
+        (folder / 'meta.json').write_text(json.dumps(meta))
+        JOBS[job] = {'status': 'done', 'video': {
+            'id': vid, **meta, 'video_url': f'/api/videos/{vid}/source'}}
+    except Exception as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        message = str(exc) if isinstance(exc, ValueError) else 'Import failed. Check server dependencies or upload the original video file.'
+        JOBS[job] = {'status': 'error', 'error': message}
+    finally:
+        IMPORT_SLOT.release()
 
 
 @app.post('/api/upload')
