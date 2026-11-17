@@ -16,7 +16,7 @@ services:
       - key: MAX_UPLOAD_MB
         value: "200"
       - key: MAX_DURATION_SECONDS
-        value: "1800"
+        value: "3600"
       - key: WHISPER_MODEL
         value: tiny
       - key: CORS_ORIGINS

@@ -80,98 +80,94 @@ function offerDownload(id, path, filename) {
     link.href = '#';
     link.classList.remove('hidden');
 }
-let checkedYouTubeUrl = '', objectUrl = '';
+let objectUrl = '';
 const editorActions = ['analyze', 'generateCaptions', 'addCaption', 'export'];
 const jsonHeaders = {'Content-Type': 'application/json'};
 
-function resetYouTubeLink() {
-    checkedYouTubeUrl = '';
-    $('youtubeSteps').classList.add('hidden');
-    $('youtubeStudio').removeAttribute('href');
-    $('youtubeAuthorized').checked = false;
-    $('youtubeFile').disabled = true;
-    msg('youtubeStatus', '');
-}
-
-$('youtubeUrl').oninput = resetYouTubeLink;
 $('youtubeForm').onsubmit = async event => {
     event.preventDefault();
-    resetYouTubeLink();
-    const url = $('youtubeUrl').value.trim();
-    $('checkYouTube').disabled = true;
-    msg('youtubeStatus', 'Checking link…');
+    const locked = [...editorActions, 'file', 'youtubeUrl', 'checkYouTube', 'saveBackend'];
+    const previous = locked.map(id => $(id).disabled);
+    locked.forEach(id => $(id).disabled = true);
+    let ready = false;
     try {
-        const result = await api('/api/import/youtube/validate', {
-            method: 'POST', headers: jsonHeaders, body: JSON.stringify({url})
+        msg('youtubeStatus', 'Importing video from YouTube…');
+        const started = await api('/api/import/youtube', {
+            method: 'POST', headers: jsonHeaders,
+            body: JSON.stringify({url: $('youtubeUrl').value.trim()})
         });
-        if (url !== $('youtubeUrl').value.trim()) return;
-        checkedYouTubeUrl = url;
-        $('youtubeStudio').href = result.studio_url;
-        $('youtubeSteps').classList.remove('hidden');
-        msg('youtubeStatus', 'Link format is valid. Save your video in YouTube Studio to continue.');
+        const deadline = Date.now() + 16 * 60 * 1000;
+        let video;
+        while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            const job = await api('/api/jobs/' + started.job_id);
+            if (job.status === 'error') throw Error(job.error);
+            if (job.status === 'not_found') throw Error('Import was lost after a server restart. Try again.');
+            if (job.status === 'done') { video = job.video; break; }
+            msg('youtubeStatus', job.stage || 'Importing…');
+        }
+        if (!video) throw Error('Import did not finish in time. Try again later.');
+        msg('youtubeStatus', 'Loading video preview…');
+        const response = await request(video.video_url);
+        if (!response.ok) throw Error('Could not load imported video. Check your connection.');
+        loadVideo(video, await response.blob(), video.title);
+        ready = true;
+        msg('youtubeStatus', 'Imported. Finding highlight suggestions…');
+        await $('analyze').onclick();
+        msg('youtubeStatus', 'Video ready. Review the suggested moments and export your clips.');
     } catch (error) {
-        if (url === $('youtubeUrl').value.trim()) msg('youtubeStatus', error.message);
+        msg('youtubeStatus', error.message);
     } finally {
-        $('checkYouTube').disabled = false;
+        locked.forEach((id, i) => $(id).disabled = ready && editorActions.includes(id) ? false : previous[i]);
     }
 };
-$('youtubeAuthorized').onchange = () => {
-    $('youtubeFile').disabled = !$('youtubeAuthorized').checked;
-};
 
-async function uploadVideo(input, youtubeUrl = '') {
+function loadVideo(video, blob, name) {
+    videoId = video.id;
+    transcript = [];
+    selected = -1;
+    drawCaptions();
+    $('captionEditor').classList.add('hidden');
+    $('suggestions').replaceChildren();
+    for (const id of ['download', 'srtDownload']) $(id).classList.add('hidden');
+    msg('analysisStatus', '');
+    msg('exportStatus', 'Choose your cut to export.');
+    $('start').value = $('rangeStart').value = 0;
+    $('rangeStart').max = $('rangeEnd').max = video.duration;
+    $('end').value = $('rangeEnd').value = Math.min(30, video.duration).toFixed(1);
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = URL.createObjectURL(blob);
+    $('player').src = objectUrl;
+    $('player').classList.add('visible');
+    $('placeholder').style.display = 'none';
+    msg('meta', name);
+    msg('uploadStatus', 'Video ready');
+}
+
+async function uploadVideo(input) {
     const file = input.files[0];
     if (!file) return;
     const previous = editorActions.map(id => $(id).disabled);
-    const locked = [...editorActions, 'file', 'youtubeFile', 'youtubeUrl', 'youtubeAuthorized', 'saveBackend'];
+    const locked = [...editorActions, 'file', 'youtubeUrl', 'checkYouTube', 'saveBackend'];
     for (const id of locked) $(id).disabled = true;
     let ready = false;
     try {
         msg('uploadStatus', 'Uploading ' + file.name + '…');
         const form = new FormData();
         form.append('file', file);
-        if (youtubeUrl) {
-            form.append('youtube_url', youtubeUrl);
-            form.append('authorized', 'true');
-        }
         const video = await api('/api/upload', {method: 'POST', body: form});
-        videoId = video.id;
-        transcript = [];
-        selected = -1;
-        drawCaptions();
-        $('captionEditor').classList.add('hidden');
-        $('suggestions').replaceChildren();
-        for (const id of ['download', 'srtDownload']) $(id).classList.add('hidden');
-        msg('analysisStatus', '');
-        msg('exportStatus', 'Choose your cut to export.');
-        $('start').value = $('rangeStart').value = 0;
-        $('rangeStart').max = $('rangeEnd').max = video.duration;
-        $('end').value = $('rangeEnd').value = Math.min(30, video.duration).toFixed(1);
-
-        if (objectUrl) URL.revokeObjectURL(objectUrl);
-        objectUrl = URL.createObjectURL(file);
-        $('player').src = objectUrl;
-        $('player').classList.add('visible');
-        $('placeholder').style.display = 'none';
-        msg('meta', file.name);
-        msg('uploadStatus', 'Video ready');
+        loadVideo(video, file, file.name);
         ready = true;
     } catch (error) {
         msg('uploadStatus', error.message);
     } finally {
         input.value = '';
         for (const id of locked) $(id).disabled = false;
-        $('youtubeFile').disabled = !$('youtubeAuthorized').checked;
         editorActions.forEach((id, index) => { $(id).disabled = !ready && previous[index]; });
     }
 }
 
 $('file').onchange = event => uploadVideo(event.target);
-$('youtubeFile').onchange = event => {
-    if (checkedYouTubeUrl && $('youtubeAuthorized').checked) {
-        return uploadVideo(event.target, checkedYouTubeUrl);
-    }
-};
 function setTrim(start, end) {
     $('start').value = $('rangeStart').value = start;
     $('end').value = $('rangeEnd').value = end;
@@ -182,7 +178,7 @@ $('rangeStart').oninput=e=>$('start').value=e.target.value;
 $('rangeEnd').oninput=e=>$('end').value=e.target.value;
 $('start').oninput=e=>$('rangeStart').value=e.target.value;
 $('end').oninput=e=>$('rangeEnd').value=e.target.value;
-$('analyze').onclick=async()=>{try{msg('analysisStatus','Analyzing...');const sourceId=videoId;const x=await api('/api/videos/'+sourceId+'/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clip_length:Number($('duration').value),count:Number($('count').value),transcribe:$('transcribe').checked})});if(sourceId!==videoId)return;msg('analysisStatus',x.warning||'Analysis complete');const list=$('suggestions');list.replaceChildren();for(const s of (x.suggestions||x.clips||[])){const b=document.createElement('button');b.className='suggestion';b.textContent=(s.start||0).toFixed(1)+'–'+(s.end||0).toFixed(1)+'s';b.onclick=()=>setTrim(s.start, s.end);list.append(b)}}catch(e){msg('analysisStatus',e.message)}};
+$('analyze').onclick=async()=>{try{msg('analysisStatus','Analyzing...');const sourceId=videoId;const x=await api('/api/videos/'+sourceId+'/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clip_length:Number($('duration').value),count:Number($('count').value),transcribe:$('transcribe').checked})});if(sourceId!==videoId)return;msg('analysisStatus',x.warning||'Analysis complete — review suggestions before exporting');if(x.transcript?.length){transcript=x.transcript;drawCaptions();}const list=$('suggestions');list.replaceChildren();for(const s of (x.suggestions||x.clips||[])){const b=document.createElement('button');b.className='suggestion';b.textContent=(s.start||0).toFixed(1)+'–'+(s.end||0).toFixed(1)+'s';b.title=s.reason||'';b.onclick=()=>{setTrim(s.start,s.end);$('player').currentTime=s.start;};list.append(b)}}catch(e){msg('analysisStatus',e.message)}};
 function drawCaptions(){const t=$('timelineTrack');t.querySelectorAll('.cue').forEach(x=>x.remove());transcript.forEach((c,i)=>{const b=document.createElement('button');b.className='cue';b.textContent=c.text;b.onclick=()=>{selected=i;$('captionEditor').classList.remove('hidden');$('cueText').value=c.text;$('cueStart').value=c.start;$('cueEnd').value=c.end};t.append(b)});msg('timelineStatus',transcript.length+' caption segments')};
 $('generateCaptions').onclick=async()=>{try{msg('timelineStatus','Transcribing...');const sourceId=videoId;const x=await api('/api/videos/'+sourceId+'/transcribe',{method:'POST'});if(sourceId!==videoId)return;transcript=x.cues||x.segments||x.transcript||[];if(!Array.isArray(transcript))transcript=[];drawCaptions()}catch(e){msg('timelineStatus',e.message)}};
 $('addCaption').onclick=()=>{transcript.push({start:Number($('start').value),end:Number($('end').value),text:'New caption'});drawCaptions()};
